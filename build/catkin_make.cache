@@ -1,0 +1,2 @@
+MORAI-ROS_morai_msgs:pointcloud_to_laserscan:test:vesc/vesc:vesc/vesc_ackermann:vesc/vesc_driver:vesc/vesc_msgs
+-DCATKIN_DEVEL_PREFIX=/home/agung/ros_ed_ws/devel -DCMAKE_INSTALL_PREFIX=/home/agung/ros_ed_ws/install -G Unix Makefiles
