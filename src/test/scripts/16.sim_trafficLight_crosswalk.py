@@ -4,15 +4,15 @@
 """# -*- coding: utf-8 -*- : 인코딩 설정"""
 # -*- coding:utf-8-*-
 
+from std_msgs.msg import Float64 # ROS 이미지
+from time import * # 병목 찾기
+from sensor_msgs.msg import CompressedImage, LaserScan
+from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
+from morai_msgs.msg import GetTrafficLightStatus
+import rospy
+import numpy as np # 행렬 연산을 위한 라이브러리
 from math import *
 import cv2
-import numpy as np # 행렬 연산을 위한 라이브러리
-import rospy
-from morai_msgs.msg import GetTrafficLightStatus
-from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
-from sensor_msgs.msg import CompressedImage, LaserScan
-from time import * # 병목 찾기
-from std_msgs.msg import Float64 # ROS 이미지
 
 
 class Traffic_control:
@@ -184,7 +184,7 @@ class Traffic_control:
         self.scan_msg = msg
         self.steer = self.obstacle()
 
-    def obstacle(self):
+    def obstacle(self, msg):
         """ degree : -180 부터 180까지 360도임 """
         self.scan_msg = msg
         degree_min = self.scan_msg.angle_min*180/pi
@@ -251,7 +251,7 @@ class Traffic_control:
         self.speed_pub.publish(self.speed_msg)
 
     def action(self):
-        if self.img is not None and len(self.img) != 0:
+        if len(self.img) != 0:
             if self.cross_flag == True and self.signal == 1:
                 speed = 0
                 steer = 0.5
@@ -277,7 +277,7 @@ def main():
         while not rospy.is_shutdown():
             traffic_control.action()
         # rospy.spin() : pub 있는 노드에선 불필요
-    except rospy.ROSInterruptException:  # ctrl C -> 강제종료
+    except rospy.ROSInterruptException():  # ctrl C -> 강제종료
         pass
 
 

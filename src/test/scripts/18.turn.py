@@ -4,19 +4,20 @@
 """# -*- coding: utf-8 -*- : 인코딩 설정"""
 # -*- coding:utf-8-*-
 
-import rospy
-from sensor_msgs.msg import CompressedImage # ROS 이미지
-import cv2
-import numpy as np # 행렬 연산을 위한 라이브러리
 from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
 from  std_msgs.msg import Float64
+import numpy as np # 행렬 연산을 위한 라이브러리
+import cv2
+import rospy
+from sensor_msgs.msg import CompressedImage # ROS 이미지
 
 
 class Lane_sub:
 
     def __init__(self):
-        rospy.init_node("lane_sub_node")
-        rospy.Subscriber("/image_jpeg/compressed", CompressedImage, self.cam_CB)
+        rospy.init_node("lane_turn_node")
+        rospy.Subscriber("/image_jpeg/compressed", CompressedImage, self.cam_CB,
+                         queue_size=1, buff_size=2**20, tcp_nodelay=True)
         self.ros_image = CompressedImage()
         self.bridge = CvBridge()
 
@@ -24,15 +25,19 @@ class Lane_sub:
         self.speed_pub = rospy.Publisher("/commands/motor/speed", Float64, queue_size=1)
         self.steer_msg = Float64()
         self.speed_msg = Float64()
+        self.speed_msg.data = 900.0   # ← 추가(권장): 기본 주행 속도
 
-        self.cross_flag = 0
+        """# --- 1단계용: 교차로 감지용 변수 ---"""
+        self.cross_flag = False  # 교차로(정지선) 감지 플래그
+        self.cross_on_frames = 0  # 교차로에서의 프레임 수
+        self.cross_off_frames = 0  # 교차로에서 벗어난 프레임 수
 
     def cam_CB(self, msg):
+
         img = self.bridge.compressed_imgmsg_to_cv2(msg)
         y, x = img.shape[0:2]
 
         img_hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        h, s, v = cv2.split(img_hsv)
 
         # 픽셀 값이 지정된 범위에 속하면 추출
         yellow_lower = np.array([15, 150, 0])  # 최소 임계값
@@ -72,6 +77,46 @@ class Lane_sub:
         bin2_img = np.zeros_like(grayed_img)  # 구조를 복사하되, 값은 0으로 채움
         bin2_img[grayed_img > 80] = 255
 
+        # 7. 가로선(정지선/교차로) 추출  ─ 하단부에서 '두꺼운 가로 밴드' 감지
+        histogram_y = np.sum(bin_img, axis=1)     # y축 기준 -> 행의 합 히스토그램
+        down_hist = histogram_y[y//2:]            # 하단 절반만 사용 (카메라 아래쪽)
+
+        # 한 행(row)에 흰 픽셀 수가 화면 가로의 일정 비율 이상이면 '가로선 성분'으로 판단
+        cross_row_pix_th = int(0.45 * x)          # 행당 흰 픽셀 임계치(가로 45%)  [튜닝 포인트]
+        cross_rows = np.where(down_hist > cross_row_pix_th)[0]
+
+        # '가로선'이 여러 행에 걸쳐 연속적으로 나타나면 교차로/정지선으로 판단
+        cross_min_height = int(0.04 * y)          # 최소 두께(화면 높이의 4%)  [튜닝 포인트]
+
+        detected_now = False
+        try:
+            if len(cross_rows) > 0:
+                cross_span = cross_rows[-1] - cross_rows[0]   # 연속 구간 대략 두께
+                if cross_span >= cross_min_height:
+                    detected_now = True
+                    # 시각화(버드뷰): 하단 오프셋(y//2)을 다시 더해 원래 좌표로 사각형 그림
+                    p1 = (0, y//2 + int(cross_rows[0]))
+                    p2 = (x-1, y//2 + int(cross_rows[-1]))
+                    cv2.rectangle(bird_view_img, p1, p2, (0, 255, 0), 3)
+        except:
+            detected_now = False
+
+        # 디바운싱(깜빡임 방지): 3프레임 이상 연속 검출 시 True, 3프레임 이상 연속 미검출 시 False
+        if detected_now:
+            self.cross_on_frames += 1
+            self.cross_off_frames = 0
+        else:
+            self.cross_off_frames += 1
+            self.cross_on_frames = 0
+
+        if self.cross_on_frames >= 3:
+            self.cross_flag = True
+        elif self.cross_off_frames >= 3:
+            self.cross_flag = False
+
+        if self.cross_flag:
+            print(">> 교차로/정지선 감지 (cross_flag = True)")
+
         # 5. 차선의 중앙 추정
         histogram = np.sum(bin_img, axis=0)  # 차선이 어느 열에 더 많이 분포하는지 파악
         lane_indices = np.where(histogram > 20)[0]  # 각 차원별로 반환하므로 1차원 추출
@@ -80,7 +125,7 @@ class Lane_sub:
         left_lane_indices = np.where(left_histogram > 20)[0]
 
         right_histogram = histogram[x//2:]
-        right_lane_indices = np.where(right_histogram > 20)[0] + 320
+        right_lane_indices = np.where(right_histogram > 20)[0] + x//2
 
         try:
             if len(left_lane_indices) > 0 and len(right_lane_indices) == 0:  # 차가 오른쪽으로 기울어짐
@@ -100,32 +145,7 @@ class Lane_sub:
             center_index = x//2
             print("no lane")
 
-        # # a. canny 엣지 이미지
-        # canny_img = cv2.Canny(bin_img, 2, 2)
-
-        # # b. 허프 변환
-        # lines = cv2.HoughLinesP(canny_img, 0.01, np.pi / 180, 90, minLineLength=50, maxLineGap=5)
-        # # c. 선 그리기
-        # try:
-        #     for line in lines:
-        #         x1, y1, x2, y2 = line[0]
-        #         cv2.line(bird_view_img, (x1, y1), (x2, y2), (0, 255, 0), 5)
-        #         self.cross_flag += 1
-        # except:
-        #     pass
-
-        # # 6. 차선의 중앙을 맞추는 뱅뱅 컨트롤
-        # error = (center_index-x//2)  # 음수면 자동차가 오른쪽, 양수면 왼쪽으로 치우침
-        # nomalized_error = error/x  # -0.5 ~ +0.5
-        # steer_data = 0.5 + (nomalized_error)
-
-        # self.steer_msg.data = max(0, min(1, steer_data))  # 클리핑
-        # print(f"steer : {self.steer_msg.data}")
-
-        # self.speed_msg.data = 900
-        # self.steer_pub.publish(self.steer_msg)
-        # self.speed_pub.publish(self.speed_msg)
-         # 6. 차선의 중앙을 맞추는 PD 컨트롤  ← 이 블록 전체를 아래로 교체
+       # 6. 차선의 중앙을 맞추는 PD 컨트롤  ← 이 블록 전체를 아래로 교체
         error = (center_index - x//2)  # 음수: 우측 치우침, 양수: 좌측 치우침
 
         # 이전 에러 준비
@@ -165,7 +185,7 @@ class Lane_sub:
         # cv2.imshow("img_yellow_range", yellow_range)
         # cv2.imshow("img_white_range", white_range)
         # cv2.imshow("combined_mask", combined_mask)
-        cv2.imshow("bird_view_img", bird_view_img)
+        # cv2.imshow("bird_view_img", bird_view_img)
         # cv2.imshow("bin2_img", bin2_img)
         cv2.waitKey(1)
 
