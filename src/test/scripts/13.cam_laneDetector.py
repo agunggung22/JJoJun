@@ -100,31 +100,6 @@ class Lane_sub:
             center_index = x//2
             print("no lane")
 
-        # # a. canny 엣지 이미지
-        # canny_img = cv2.Canny(bin_img, 2, 2)
-
-        # # b. 허프 변환
-        # lines = cv2.HoughLinesP(canny_img, 0.01, np.pi / 180, 90, minLineLength=50, maxLineGap=5)
-        # # c. 선 그리기
-        # try:
-        #     for line in lines:
-        #         x1, y1, x2, y2 = line[0]
-        #         cv2.line(bird_view_img, (x1, y1), (x2, y2), (0, 255, 0), 5)
-        #         self.cross_flag += 1
-        # except:
-        #     pass
-
-        # # 6. 차선의 중앙을 맞추는 뱅뱅 컨트롤
-        # error = (center_index-x//2)  # 음수면 자동차가 오른쪽, 양수면 왼쪽으로 치우침
-        # nomalized_error = error/x  # -0.5 ~ +0.5
-        # steer_data = 0.5 + (nomalized_error)
-
-        # self.steer_msg.data = max(0, min(1, steer_data))  # 클리핑
-        # print(f"steer : {self.steer_msg.data}")
-
-        # self.speed_msg.data = 900
-        # self.steer_pub.publish(self.steer_msg)
-        # self.speed_pub.publish(self.speed_msg)
          # 6. 차선의 중앙을 맞추는 PD 컨트롤  ← 이 블록 전체를 아래로 교체
         error = (center_index - x//2)  # 음수: 우측 치우침, 양수: 좌측 치우침
 
@@ -136,7 +111,7 @@ class Lane_sub:
         self.prev_error = normalized_error           # ← 업데이트 잊지 말기
 
         # 주행 속도 설정
-        speed = 1300.0
+        speed = 1000.0
 
         # [속도 기반 게인 가이드]
         #   Kp: "얼마나 세게 따라갈까?"  → 크면 빠르지만 불안정 가능
@@ -174,7 +149,7 @@ def main():
     try:
         turtle_sub = Lane_sub()
         rospy.spin()
-    except rospy.ROSInterruptException():  # ctrl C -> 강제종료
+    except rospy.ROSInterruptException:  # ctrl C -> 강제종료
         pass
 
 
