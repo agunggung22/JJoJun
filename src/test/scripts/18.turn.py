@@ -4,12 +4,12 @@
 """# -*- coding: utf-8 -*- : 인코딩 설정"""
 # -*- coding:utf-8-*-
 
+import rospy
+from sensor_msgs.msg import CompressedImage # ROS 이미지
+import cv2
+import numpy as np # 행렬 연산을 위한 라이브러리
 from  std_msgs.msg import Float64
 from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
-import numpy as np # 행렬 연산을 위한 라이브러리
-import cv2
-from sensor_msgs.msg import CompressedImage # ROS 이미지
-import rospy
 
 
 class Lane_sub:
@@ -42,6 +42,8 @@ class Lane_sub:
 
         # 시퀀스 관련 변수들
         self.action_sequence = ["left", "left", "left", "left"]  # 동작 시퀀스
+
+        # self.action_sequence = ["straight", "straight", "straight", "straight"]  # 동작 시퀀스
         self.current_seq_index = 0  # 현재 시퀀스 인덱스
         self.stop_line_detected_time = 0.0  # 정지선 마지막 감지 시간
         self.stop_line_ignore_duration = 2.0  # 정지선 무시 시간 (초)
@@ -105,13 +107,13 @@ class Lane_sub:
 
         # 5. 차선의 중앙 추정
         histogram = np.sum(bird_view_img, axis=0)  # 차선이 어느 열에 더 많이 분포하는지 파악
-        lane_indices = np.where(histogram > 22)[0]  # 각 차원별로 반환하므로 1차원 추출
+        lane_indices = np.where(histogram > 20)[0]  # 각 차원별로 반환하므로 1차원 추출
 
         left_histogram = histogram[0:self.x//2]
-        left_lane_indices = np.where(left_histogram > 22)[0]
+        left_lane_indices = np.where(left_histogram > 20)[0]
 
         right_histogram = histogram[self.x//2:]
-        right_lane_indices = np.where(right_histogram > 22)[0] + self.x//2
+        right_lane_indices = np.where(right_histogram > 20)[0] + self.x//2
         print(len(left_lane_indices), len(right_lane_indices))
 
         # 차선 폭 실시간 출력 추가
@@ -252,8 +254,9 @@ class Lane_sub:
         # 스티어 기준: 0.5가 직진, 0.3쪽이 좌, 0.7쪽이 우
         if direction == "left":
             # 0.0~0.5s : 약하게 좌로 코너 진입
-            # 0.5~1.6s : 강하게 좌회전
-            # 1.6~2.2s : 완만 좌(복원)
+            # 0.5~1.2s : 강하게 좌회전
+            # 1.2~2.0s : 더 강하게 좌회전
+            # 2.0~2.8s : 완만 좌(복원)
             if t < 0.5:
                 steer = 0.4
             elif t < 1.2:
@@ -264,18 +267,21 @@ class Lane_sub:
                 steer = 0.3
             else:
                 steer = 0.40  # 복원 대기
-        else:  # right
-            # 0.0~0.5s : 약하게 우로 코너 진입
-            # 0.5~1.4s : 강하게 우회전
-            # 1.4~2.0s : 완만 우(복원)
+        else:  # right - 왼쪽 회전과 대칭으로 수정
+            # 0.0~0.5s : 약하게 우로 코너 진입 (0.4 -> 0.6)
+            # 0.5~1.2s : 강하게 우회전 (0.3 -> 0.7)
+            # 1.2~2.0s : 더 강하게 우회전 (0.22 -> 0.78)
+            # 2.0~2.8s : 완만 우(복원) (0.3 -> 0.7)
             if t < 0.5:
-                steer = 0.58
-            elif t < 1.4:
-                steer = 0.70
+                steer = 0.6   # 0.4 대칭
+            elif t < 1.2:
+                steer = 0.7   # 0.3 대칭
             elif t < 2.0:
-                steer = 0.60
+                steer = 0.78  # 0.22 대칭
+            elif t < 2.8:
+                steer = 0.7   # 0.3 대칭
             else:
-                steer = 0.55  # 복원 대기
+                steer = 0.60  # 0.40 대칭
 
         # 회전 시 고정 속도 사용
         v_out = self.turn_speed
@@ -312,10 +318,12 @@ class Lane_sub:
                 print(f"회전 시작: {self.turn_dir}")
 
         # 조향 및 속도 결정
-        if self.turning:  # 회전 중인 경우
+        # 회전 중인 경우
+        if self.turning:
             steer, speed = self.turn(msg, direction=self.turn_dir)
             print(f"turn: {self.turn_dir}, steer={steer:.2f}, speed={speed:.0f}")
-        else:  # 직진 주행
+        # 직진 주행
+        else:
             steer, speed = self.straight(msg)
             # 정지선 후 직진 유지 중일 때는 직진 유지
             if self.post_stopline_straight:
