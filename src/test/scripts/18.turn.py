@@ -25,12 +25,33 @@ class Lane_sub:
         self.speed_pub = rospy.Publisher("/commands/motor/speed", Float64, queue_size=1)
         self.steer_msg = Float64()
         self.speed_msg = Float64()
-        self.speed_msg.data = 900.0   # ← 기본 주행 속도
+        self.speed_msg.data = 1500.0   # ← 기본 주행 속도
+        # 기본 차선폭은 320
 
         """# --- 1단계용: 교차로 감지용 변수 ---"""
         self.cross_flag = False  # 교차로(정지선) 감지 플래그
         self.cross_on_frames = 0  # 교차로에서의 프레임 수
         self.cross_off_frames = 0  # 교차로에서 벗어난 프레임 수
+
+        # 회전 관련 변수들
+        self.turning = False
+        self.turn_dir = "left"  # "left" 또는 "right"
+        self.turn_phase = "idle"
+        self.turn_t0 = 0.0
+        self.turn_speed = 1000.0  # 회전 시 고정 속도
+
+        # 시퀀스 관련 변수들
+        self.action_sequence = ["left", "left", "left", "left"]  # 동작 시퀀스
+        self.current_seq_index = 0  # 현재 시퀀스 인덱스
+        self.stop_line_detected_time = 0.0  # 정지선 마지막 감지 시간
+        self.stop_line_ignore_duration = 2.0  # 정지선 무시 시간 (초)
+        self.stop_line_triggered = False  # 정지선 트리거 플래그
+
+        # 정지선 후 직진 유지 관련 변수들
+        self.post_stopline_straight = False  # 정지선 후 직진 유지 플래그
+        self.post_stopline_start_time = 0.0  # 정지선 후 직진 시작 시간
+        self.post_stopline_duration = 0.8  # 정지선 후 직진 유지 시간 (초)
+        self.pending_action = None  # 대기 중인 동작
 
         self.x = 0  # 이미지 가로 크기
         self.y = 0  # 이미지 세로 크기
@@ -93,13 +114,29 @@ class Lane_sub:
         right_lane_indices = np.where(right_histogram > 22)[0] + self.x//2
         print(len(left_lane_indices), len(right_lane_indices))
 
+        # 차선 폭 실시간 출력 추가
+        if len(left_lane_indices) > 0 and len(right_lane_indices) > 0:
+            left_center = left_lane_indices.mean()
+            right_center = right_lane_indices.mean()
+            current_lane_width = right_center - left_center
+            lane_width_ratio = current_lane_width / self.x
+            print(f"차선 폭: {current_lane_width:.1f}px ({lane_width_ratio:.3f} * 화면폭)")
+
         try:
             if len(left_lane_indices) > 0 and len(right_lane_indices) > 0:
-                center_index = (lane_indices[0]+lane_indices[-1])//2
-                print("both line")
-        except:
+                center_index = (lane_indices[0] + lane_indices[-1]) // 2
+                # print("both line")
+            elif len(left_lane_indices) > 0:
+                # 왼쪽만 보이면 오른쪽을 추정(차선폭 픽셀은 트랙 기준 고정/튜닝값)
+                lane_w = getattr(self, 'lane_w_px', int(0.30*self.x))
+                center_index = int((left_lane_indices.mean() + lane_w/2))
+            elif len(right_lane_indices) > 0:
+                lane_w = getattr(self, 'lane_w_px', int(0.30*self.x))
+                center_index = int((right_lane_indices.mean() - lane_w/2))
+            else:
+                center_index = self.x//2
+        except Exception as e:
             center_index = self.x//2
-            print("no lane")
 
        # 6. 차선의 중앙을 맞추는 PD 컨트롤  ← 이 블록 전체를 아래로 교체
         error = (center_index - self.x//2)  # 음수: 우측 치우침, 양수: 좌측 치우침
@@ -131,6 +168,11 @@ class Lane_sub:
 
     # 교차로/정지선 감지
     def stop_line_flag(self, img):
+        # 정지선 무시 시간 체크
+        current_time = rospy.get_time()
+        if current_time - self.stop_line_detected_time < self.stop_line_ignore_duration:
+            return False  # 무시 시간 동안은 정지선 감지 안함
+
         bird_view_img = self.bird_view_transform(img)
 
         # 7. 가로선(정지선/교차로) 추출  ─ 하단부에서 '두꺼운 가로 밴드' 감지
@@ -153,7 +195,6 @@ class Lane_sub:
                     # 시각화(버드뷰): 하단 오프셋(y//2)을 다시 더해 원래 좌표로 사각형 그림
                     p1 = (0, self.y//2 + int(cross_rows[0]))
                     p2 = (self.x-1, self.y//2 + int(cross_rows[-1]))
-                    cv2.rectangle(bird_view_img, p1, p2, (0, 255, 0), 3)
         except:
             detected_now = False
 
@@ -165,24 +206,145 @@ class Lane_sub:
             self.cross_off_frames += 1
             self.cross_on_frames = 0
 
+        # 새로운 정지선 감지 로직
+        prev_cross_flag = self.cross_flag
         if self.cross_on_frames >= 3:
             self.cross_flag = True
         elif self.cross_off_frames >= 3:
             self.cross_flag = False
 
-        if self.cross_flag:
-            print(">> 교차로/정지선 감지 (cross_flag = True)")
+        # 정지선이 새로 감지되었을 때 시퀀스 처리 및 0.5초 직진 후 동작 실행
+        if self.cross_flag and not prev_cross_flag:  # rising edge 감지
+            self.stop_line_detected_time = current_time
+            current_action = self.action_sequence[self.current_seq_index]
+
+            # 0.5초 직진 유지 시작
+            self.post_stopline_straight = True
+            self.post_stopline_start_time = current_time
+            self.pending_action = current_action
+
+            # 다음 시퀀스로 이동
+            self.current_seq_index = (self.current_seq_index + 1) % len(self.action_sequence)
+
         return self.cross_flag
 
-    def turn(self, img):
-        """어려웡"""
+    def apply_stopline_logic(self, img):
+        # 정지선 로직은 더 이상 속도 제어하지 않음 (즉시 동작 실행)
+        pass
+
+    def turn(self, img, direction=None):
+        """
+        하드코딩 좌/우회전.
+        - 신호/정지선 검출과 무관하게 'turning' 플래그가 켜진 상태에서 시간 기반으로 스티어를 내보냄
+        - 종료 조건: (i) 회전 타임아웃 초과, (ii) 최소 유지 시간 후 차선 재획득 프레임 누적
+        """
+        if direction is None:
+            direction = self.turn_dir
+
+        now = rospy.get_time()
+        if self.turn_phase == "idle":
+            self.turn_phase = "enter"
+            self.turn_t0 = now
+
+        t = now - self.turn_t0
+
+        # ===== 하드코딩 스티어 타임라인(필요하면 숫자만 조정) =====
+        # 스티어 기준: 0.5가 직진, 0.3쪽이 좌, 0.7쪽이 우
+        if direction == "left":
+            # 0.0~0.5s : 약하게 좌로 코너 진입
+            # 0.5~1.6s : 강하게 좌회전
+            # 1.6~2.2s : 완만 좌(복원)
+            if t < 0.5:
+                steer = 0.4
+            elif t < 1.2:
+                steer = 0.3
+            elif t < 2.0:
+                steer = 0.22
+            elif t < 2.8:
+                steer = 0.3
+            else:
+                steer = 0.40  # 복원 대기
+        else:  # right
+            # 0.0~0.5s : 약하게 우로 코너 진입
+            # 0.5~1.4s : 강하게 우회전
+            # 1.4~2.0s : 완만 우(복원)
+            if t < 0.5:
+                steer = 0.58
+            elif t < 1.4:
+                steer = 0.70
+            elif t < 2.0:
+                steer = 0.60
+            else:
+                steer = 0.55  # 복원 대기
+
+        # 회전 시 고정 속도 사용
+        v_out = self.turn_speed
+
+        timeout = 3.2  # 필요 시 미세 조정
+        need_exit = t > timeout
+
+        if need_exit:
+            # 종료 리셋
+            self.turning = False
+            self.turn_phase = "idle"
+
+        return steer, v_out
 
     def cam_CB(self, msg):
-        bird_view_img = self.bird_view_transform(msg)
+        # 정지선 감지 업데이트
+        self.stop_line_flag(msg)
 
-        cv2.imshow("bird_view_img", bird_view_img)
+        # 정지선 후 직진 유지 처리
+        current_time = rospy.get_time()
+        if self.post_stopline_straight:
+            if current_time - self.post_stopline_start_time >= self.post_stopline_duration:
+                # 0.5초 경과, 대기 중인 동작 실행
+                self.post_stopline_straight = False
+                if self.pending_action == "left":
+                    self.turning = True
+                    self.turn_dir = "left"
+                    self.turn_phase = "idle"  # 회전 상태 초기화
+                elif self.pending_action == "right":
+                    self.turning = True
+                    self.turn_dir = "right"
+                    self.turn_phase = "idle"  # 회전 상태 초기화
+                self.pending_action = None
+                print(f"회전 시작: {self.turn_dir}")
 
-        cv2.waitKey(1)
+        # 조향 및 속도 결정
+        if self.turning:  # 회전 중인 경우
+            steer, speed = self.turn(msg, direction=self.turn_dir)
+            print(f"turn: {self.turn_dir}, steer={steer:.2f}, speed={speed:.0f}")
+        else:  # 직진 주행
+            steer, speed = self.straight(msg)
+            # 정지선 후 직진 유지 중일 때는 직진 유지
+            if self.post_stopline_straight:
+                steer = 0.5  # 강제 직진
+                print(f"keep straight: steer={steer:.2f}, speed={speed:.0f}")
+            else:
+                print(f"straight: steer={steer:.2f}, speed={speed:.0f}")
+
+        # 안전 체크: steer 값 범위 제한
+        steer = max(0.0, min(1.0, steer))
+
+        # 안전 체크: speed 값 범위 제한
+        speed = max(0.0, min(2000.0, speed))
+
+        # 메시지 발행
+        self.steer_msg.data = float(steer)
+        self.speed_msg.data = float(speed)
+        self.steer_pub.publish(self.steer_msg)
+        self.speed_pub.publish(self.speed_msg)
+
+        # 상태 디버그 출력
+        if self.turning:
+            elapsed = rospy.get_time() - self.turn_t0
+            print(f"회전 상태: {self.turn_phase}, 경과시간: {elapsed:.1f}s")
+
+        # # 디버그 뷰
+        # bird_view_img = self.bird_view_transform(msg)*255
+        # cv2.imshow("bird_view_img", bird_view_img)
+        # cv2.waitKey(1)
 
 
 def main():
