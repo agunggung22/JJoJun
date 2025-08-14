@@ -4,12 +4,12 @@
 """# -*- coding: utf-8 -*- : 인코딩 설정"""
 # -*- coding:utf-8-*-
 
-import rospy
 from sensor_msgs.msg import CompressedImage # ROS 이미지
+import rospy
 import cv2
 import numpy as np # 행렬 연산을 위한 라이브러리
-from  std_msgs.msg import Float64
 from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
+from  std_msgs.msg import Float64
 
 
 class Lane_sub:
@@ -42,6 +42,11 @@ class Lane_sub:
 
         # 시퀀스 관련 변수들
         self.action_sequence = ["left", "left", "left", "left"]  # 동작 시퀀스
+
+        # 차선 한 개일 경우 변수들
+        self.one_lane = 'left'
+        self.one_lane_flag = False  # 차선 한 개일 때 플래그
+        self.straight_start_time = 0.0  # straight 시작 시간
 
         # self.action_sequence = ["straight", "straight", "straight", "straight"]  # 동작 시퀀스
         self.current_seq_index = 0  # 현재 시퀀스 인덱스
@@ -102,7 +107,7 @@ class Lane_sub:
 
         return bin_img
 
-    def straight(self, img):
+    def get_center_index(self, img, direction=None):
         bird_view_img = self.bird_view_transform(img)
 
         # 5. 차선의 중앙 추정
@@ -115,43 +120,57 @@ class Lane_sub:
         right_histogram = histogram[self.x//2:]
         right_lane_indices = np.where(right_histogram > 20)[0] + self.x//2
 
-        # 차선 인덱스의 첫 번째와 마지막 값의 차이 출력
-        if len(left_lane_indices) > 0:
-            left_diff = (left_lane_indices[-1] + left_lane_indices[0])/2
-        else:
-            left_diff = 0
+        # # 차선 인덱스의 첫 번째와 마지막 값의 차이 출력
+        # if len(left_lane_indices) > 0:
+        #     left_diff = (left_lane_indices[-1] + left_lane_indices[0])/2
+        # else:
+        #     left_diff = 0
 
-        if len(right_lane_indices) > 0:
-            right_diff = (right_lane_indices[-1] + right_lane_indices[0])/2
-        else:
-            right_diff = 0
+        # if len(right_lane_indices) > 0:
+        #     right_diff = (right_lane_indices[-1] + right_lane_indices[0])/2
+        # else:
+        #     right_diff = 0
+        # print(f"Left: {left_diff} , Right: {right_diff}")
 
-        print(f"Left: {left_diff} , Right: {right_diff}")
-
-        # 차선 폭 실시간 출력 추가
-        if len(left_lane_indices) > 0 and len(right_lane_indices) > 0:
-            left_center = left_lane_indices.mean()
-            right_center = right_lane_indices.mean()
-            current_lane_width = right_center - left_center
-            lane_width_ratio = current_lane_width / self.x
-            print(f"차선 폭: {current_lane_width:.1f}px ({lane_width_ratio:.3f} * 화면폭)")
+        # # 차선 폭 실시간 출력 추가
+        # if len(left_lane_indices) > 0 and len(right_lane_indices) > 0:
+        #     left_center = left_lane_indices.mean()
+        #     right_center = right_lane_indices.mean()
+        #     current_lane_width = right_center - left_center
+        #     lane_width_ratio = current_lane_width / self.x
+        #     print(f"차선 폭: {current_lane_width:.1f}px ({lane_width_ratio:.3f} * 화면폭)")
 
         try:
-            if len(left_lane_indices) > 0 and len(right_lane_indices) > 0:
-                center_index = (lane_indices[0] + lane_indices[-1]) // 2
-                # print("both line")
-            elif len(left_lane_indices) > 0:
-                # 왼쪽만 보이면 오른쪽을 추정(차선폭 픽셀은 트랙 기준 고정/튜닝값)
-                lane_w = getattr(self, 'lane_w_px', int(0.30*self.x))
-                center_index = int((left_lane_indices.mean() + lane_w/2))
-            elif len(right_lane_indices) > 0:
-                lane_w = getattr(self, 'lane_w_px', int(0.30*self.x))
-                center_index = int((right_lane_indices.mean() - lane_w/2))
-            else:
-                center_index = self.x//2
+            if direction is None:
+                if len(left_lane_indices) > 0 and len(right_lane_indices) > 0:
+                    center_index = (lane_indices[0] + lane_indices[-1]) // 2
+                    # print("both line")
+                elif len(left_lane_indices) > 0:
+                    # 왼쪽만 보이면 오른쪽을 추정(차선폭 픽셀은 트랙 기준 고정/튜닝값)
+                    lane_w = getattr(self, 'lane_w_px', int(0.30*self.x))
+                    center_index = int((left_lane_indices.mean() + lane_w/2))
+                elif len(right_lane_indices) > 0:
+                    lane_w = getattr(self, 'lane_w_px', int(0.30*self.x))
+                    center_index = int((right_lane_indices.mean() - lane_w/2))
+                else:
+                    center_index = self.x//2
+            elif direction == "left":
+                if len(left_lane_indices) > 0:
+                    center_index = (left_lane_indices[0] + left_lane_indices[-1]) // 2 + 315/2
+                else:
+                    center_index = self.x//2
+            elif direction == "right":
+                if len(right_lane_indices) > 0:
+                    center_index = (right_lane_indices[0] + right_lane_indices[-1]) // 2 - 315/2
+                else:
+                    center_index = self.x//2
+
         except Exception as e:
             center_index = self.x//2
 
+        return center_index
+
+    def straight(self, center_index):
        # 6. 차선의 중앙을 맞추는 PD 컨트롤  ← 이 블록 전체를 아래로 교체
         error = (center_index - self.x//2)  # 음수: 우측 치우침, 양수: 좌측 치우침
 
@@ -206,9 +225,6 @@ class Lane_sub:
                 cross_span = cross_rows[-1] - cross_rows[0]   # 연속 구간 대략 두께
                 if cross_span >= cross_min_height:
                     detected_now = True
-                    # 시각화(버드뷰): 하단 오프셋(y//2)을 다시 더해 원래 좌표로 사각형 그림
-                    p1 = (0, self.y//2 + int(cross_rows[0]))
-                    p2 = (self.x-1, self.y//2 + int(cross_rows[-1]))
         except:
             detected_now = False
 
@@ -220,31 +236,13 @@ class Lane_sub:
             self.cross_off_frames += 1
             self.cross_on_frames = 0
 
-        # 새로운 정지선 감지 로직
-        prev_cross_flag = self.cross_flag
+        # 플래그 상태 업데이트
         if self.cross_on_frames >= 3:
             self.cross_flag = True
         elif self.cross_off_frames >= 3:
             self.cross_flag = False
 
-        # 정지선이 새로 감지되었을 때 시퀀스 처리 및 0.5초 직진 후 동작 실행
-        if self.cross_flag and not prev_cross_flag:  # rising edge 감지
-            self.stop_line_detected_time = current_time
-            current_action = self.action_sequence[self.current_seq_index]
-
-            # 0.5초 직진 유지 시작
-            self.post_stopline_straight = True
-            self.post_stopline_start_time = current_time
-            self.pending_action = current_action
-
-            # 다음 시퀀스로 이동
-            self.current_seq_index = (self.current_seq_index + 1) % len(self.action_sequence)
-
         return self.cross_flag
-
-    def apply_stopline_logic(self, img):
-        # 정지선 로직은 더 이상 속도 제어하지 않음 (즉시 동작 실행)
-        pass
 
     def turn(self, img, direction=None):
         """
@@ -295,9 +293,7 @@ class Lane_sub:
             else:
                 steer = 0.60  # 0.40 대칭
 
-        # 회전 시 고정 속도 사용
-        v_out = self.turn_speed
-
+        v_out = self.turn_speed  # 회전 시 고정 속도 사용
         timeout = 3.2  # 필요 시 미세 조정
         need_exit = t > timeout
 
@@ -309,40 +305,76 @@ class Lane_sub:
         return steer, v_out
 
     def cam_CB(self, msg):
-        # 정지선 감지 업데이트
+        # 기본값 설정
+        steer = 0.5
+        speed = 1500.0
+
+        # 정지선 감지 업데이트 (이전 상태 저장)
+        prev_cross_flag = self.cross_flag
         self.stop_line_flag(msg)
-
-        # 정지선 후 직진 유지 처리
         current_time = rospy.get_time()
-        if self.post_stopline_straight:
-            if current_time - self.post_stopline_start_time >= self.post_stopline_duration:
-                # 0.5초 경과, 대기 중인 동작 실행
-                self.post_stopline_straight = False
-                if self.pending_action == "left":
-                    self.turning = True
-                    self.turn_dir = "left"
-                    self.turn_phase = "idle"  # 회전 상태 초기화
-                elif self.pending_action == "right":
-                    self.turning = True
-                    self.turn_dir = "right"
-                    self.turn_phase = "idle"  # 회전 상태 초기화
-                self.pending_action = None
-                print(f"회전 시작: {self.turn_dir}")
 
-        # 조향 및 속도 결정
-        # 회전 중인 경우
-        if self.turning:
-            steer, speed = self.turn(msg, direction=self.turn_dir)
-            print(f"turn: {self.turn_dir}, steer={steer:.2f}, speed={speed:.0f}")
-        # 직진 주행
-        else:
-            steer, speed = self.straight(msg)
-            # 정지선 후 직진 유지 중일 때는 직진 유지
-            if self.post_stopline_straight:
-                steer = 0.5  # 강제 직진
-                print(f"keep straight: steer={steer:.2f}, speed={speed:.0f}")
+        # 정지선이 검출 즉시
+        if self.cross_flag and not prev_cross_flag:  # rising edge 감지
+            self.stop_line_detected_time = current_time
+            current_action = self.action_sequence[self.current_seq_index]
+
+            # 0.5초 카운트 시작
+            self.post_stopline_straight = True
+            self.post_stopline_start_time = current_time
+            self.pending_action = current_action
+
+            # straight 액션일 때 시작 시간 기록
+            if current_action == "straight":
+                self.straight_start_time = current_time
+
+            # 다음 시퀀스로 이동
+            self.current_seq_index = (self.current_seq_index + 1) % len(self.action_sequence)
+            print(f"정지선 감지, 다음 동작: {current_action}")
+
+        # 0.5초간 직진 유지
+        if self.post_stopline_straight:
+            if current_time - self.post_stopline_start_time <= 0.5:
+                steer = 0.5
+                speed = 1000.0
+                print("정지선 후 0.5초 직진 유지")
             else:
-                print(f"straight: steer={steer:.2f}, speed={speed:.0f}")
+                # 0.5초 경과, 실제 동작 시작
+                self.post_stopline_straight = False
+                print(f"동작 시작: {self.pending_action}")
+
+        # action_sequence에 따른 처리
+        elif self.pending_action == "straight":
+            # 3초간 one_lane 모드, 이후 평상시로 복귀
+            if current_time - self.straight_start_time <= 3.0:
+                center_index = self.get_center_index(msg, direction=self.one_lane)
+                steer, speed = self.straight(center_index)
+                print(f"straight (one_lane): {self.one_lane}")
+            else:
+                # 3초 경과, 평상시로 복귀
+                self.pending_action = None
+                print(f"straight 종료, 평상시로 복귀")
+
+        elif self.pending_action == "left":
+            steer, speed = self.turn(msg, direction="left")
+            print(f"turn: left, steer={steer:.2f}, speed={speed:.0f}")
+            # turn 함수에서 self.turning이 False가 되면 동작 종료
+            if not self.turning:
+                self.pending_action = None
+                print("좌회전 완료, 평상시로 복귀")
+
+        elif self.pending_action == "right":
+            steer, speed = self.turn(msg, direction="right")
+            print(f"turn: right, steer={steer:.2f}, speed={speed:.0f}")
+            # turn 함수에서 self.turning이 False가 되면 동작 종료
+            if not self.turning:
+                self.pending_action = None
+                print("우회전 완료, 평상시로 복귀")
+
+        # 평상시 주행
+        else:
+            center_index = self.get_center_index(msg)
+            steer, speed = self.straight(center_index)
 
         # 안전 체크: steer 값 범위 제한
         steer = max(0.0, min(1.0, steer))
@@ -355,11 +387,6 @@ class Lane_sub:
         self.speed_msg.data = float(speed)
         self.steer_pub.publish(self.steer_msg)
         self.speed_pub.publish(self.speed_msg)
-
-        # 상태 디버그 출력
-        if self.turning:
-            elapsed = rospy.get_time() - self.turn_t0
-            print(f"회전 상태: {self.turn_phase}, 경과시간: {elapsed:.1f}s")
 
         # # 디버그 뷰
         # bird_view_img = self.bird_view_transform(msg)*255
