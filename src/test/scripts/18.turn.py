@@ -4,12 +4,12 @@
 """# -*- coding: utf-8 -*- : 인코딩 설정"""
 # -*- coding:utf-8-*-
 
-from sensor_msgs.msg import CompressedImage # ROS 이미지
-import rospy
-import cv2
-import numpy as np # 행렬 연산을 위한 라이브러리
 from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
 from  std_msgs.msg import Float64
+import numpy as np # 행렬 연산을 위한 라이브러리
+import cv2
+import rospy
+from sensor_msgs.msg import CompressedImage # ROS 이미지
 
 
 class Lane_sub:
@@ -40,15 +40,14 @@ class Lane_sub:
         self.turn_t0 = 0.0
         self.turn_speed = 1000.0  # 회전 시 고정 속도
 
-        # 시퀀스 관련 변수들
-        self.action_sequence = ["left", "left", "left", "left"]  # 동작 시퀀스
-
         # 차선 한 개일 경우 변수들
         self.one_lane = 'left'
         self.one_lane_flag = False  # 차선 한 개일 때 플래그
         self.straight_start_time = 0.0  # straight 시작 시간
 
-        # self.action_sequence = ["straight", "straight", "straight", "straight"]  # 동작 시퀀스
+        # 시퀀스 관련 변수들
+        # self.action_sequence = ["left", "left", "left", "left"]  # 동작 시퀀스
+        self.action_sequence = ["straight", "left", "straight", "straight"]  # 동작 시퀀스
         self.current_seq_index = 0  # 현재 시퀀스 인덱스
         self.stop_line_detected_time = 0.0  # 정지선 마지막 감지 시간
         self.stop_line_ignore_duration = 2.0  # 정지선 무시 시간 (초)
@@ -254,9 +253,11 @@ class Lane_sub:
             direction = self.turn_dir
 
         now = rospy.get_time()
-        if self.turn_phase == "idle":
+        # turning이 False일 때만 초기화 (한 번만 실행)
+        if not self.turning:
             self.turn_phase = "enter"
             self.turn_t0 = now
+            self.turning = True  # 회전 시작
 
         t = now - self.turn_t0
 
