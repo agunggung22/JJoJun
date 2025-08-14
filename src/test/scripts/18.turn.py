@@ -114,7 +114,19 @@ class Lane_sub:
 
         right_histogram = histogram[self.x//2:]
         right_lane_indices = np.where(right_histogram > 20)[0] + self.x//2
-        print(len(left_lane_indices), len(right_lane_indices))
+
+        # 차선 인덱스의 첫 번째와 마지막 값의 차이 출력
+        if len(left_lane_indices) > 0:
+            left_diff = (left_lane_indices[-1] + left_lane_indices[0])/2
+        else:
+            left_diff = 0
+
+        if len(right_lane_indices) > 0:
+            right_diff = (right_lane_indices[-1] + right_lane_indices[0])/2
+        else:
+            right_diff = 0
+
+        print(f"Left: {left_diff} , Right: {right_diff}")
 
         # 차선 폭 실시간 출력 추가
         if len(left_lane_indices) > 0 and len(right_lane_indices) > 0:
