@@ -25,7 +25,7 @@ class Lane_sub:
         self.speed_pub = rospy.Publisher("/commands/motor/speed", Float64, queue_size=1)
         self.steer_msg = Float64()
         self.speed_msg = Float64()
-        self.speed_msg.data = 1000.0   # ← 기본 주행 속도
+        self.speed_msg.data = 500.0   # ← 기본 주행 속도
         # 기본 차선폭은 320
 
         """# --- 1단계용: 교차로 감지용 변수 ---"""
