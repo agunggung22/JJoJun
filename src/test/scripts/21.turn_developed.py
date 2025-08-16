@@ -109,9 +109,9 @@ class Lane_sub:
 
     def get_center_index(self, img, direction=None):
         bird_view_img = self.bird_view_transform(img)
-
-        # 하단 6~10% 마스킹: 바로 앞(정지선/노이즈) 영향 줄이고 look-ahead 강화
-        guard = max(30, int(0.08 * self.y))
+     
+        # 아래쪽 마스킹 → 너무 짧게 하면 안 됨. lookahead 확보
+        guard = max(20, int(0.04 * self.y))  # 하단 4%만 마스킹
         bird_view_img[self.y-guard:self.y, :] = 0
 
         # 5. 차선의 중앙 추정
@@ -169,40 +169,69 @@ class Lane_sub:
                 else:
                     center_index = self.x//2
 
-        except Exception as e:
+        except Exception:
             center_index = self.x//2
 
         return center_index
     
-    def straight(self, center_index):
+    def straight(self, center_index, Kp=None, Kd=None, Ki=None):
         error = center_index - self.x // 2
         normalized_error = float(error) / float(self.x)
-    
-        # 튜닝된 PID 계수
-        Kp = 0.6
-        Kd = 0.3
-        Ki = 0.005
-        dt = 0.05
-    
+        abs_error = abs(normalized_error)
+
+        # 실시간 dt 계산
+        now = rospy.get_time()
+        if not hasattr(self, 'prev_time'):
+            self.prev_time = now
+        dt = now - self.prev_time
+        self.prev_time = now
+        dt = max(0.02, min(0.2, dt))
+
+        # 기본 계수
+        base_Kp = 0.5
+        base_Kd = 0.6
+        base_Ki = 0.001
+
+        # 동적 조정ㄴ
+        if Kp is None or Kd is None or Ki is None:
+            if abs_error > 0.15:
+                Kp = base_Kp * 3.0
+                Kd = base_Kd * 1.2
+            elif abs_error > 0.08:
+                Kp = base_Kp * 2.5
+                Kd = base_Kd * 1.0
+            else:
+                Kp = base_Kp
+                Kd = base_Kd
+            Ki = base_Ki
+
         if not hasattr(self, 'prev_error'):
             self.prev_error = 0.0
         if not hasattr(self, 'integral_error'):
             self.integral_error = 0.0
-    
+
         self.integral_error += normalized_error * dt
-        self.integral_error = max(-0.1, min(0.1, self.integral_error))
+        self.integral_error = max(-0.05, min(0.05, self.integral_error))
         derivative = (normalized_error - self.prev_error) / dt
         self.prev_error = normalized_error
-    
+
         steer_data = 0.5 + (Kp * normalized_error + Kd * derivative + Ki * self.integral_error)
-        steer_data = max(0.05, min(0.95, steer_data))
-    
-        # 스티어 크기에 따라 속도 자동 조정
+        steer_data = max(0.0, min(1.0, steer_data))
+
         steer_deviation = abs(steer_data - 0.5)
         speed_data = 1000.0 - steer_deviation * 400.0
         speed_data = max(700.0, min(1000.0, speed_data))
-    
+
         return steer_data, speed_data
+
+    def send_steer(self, steer_value):
+        self.steer_msg.data = float(steer_value)
+        self.steer_pub.publish(self.steer_msg)
+
+    def send_speed(self, speed_value):
+        self.speed_msg.data = float(speed_value)
+        self.speed_pub.publish(self.speed_msg)
+
     
     def stop_line_flag(self, img):
         # 정지선 무시 시간 체크
@@ -248,7 +277,7 @@ class Lane_sub:
 
         return self.cross_flag
 
-    def turn(self, img, direction=None):
+    def turn(self, _, direction=None):
         """
         하드코딩 좌/우회전.
         - 신호/정지선 검출과 무관하게 'turning' 플래그가 켜진 상태에서 시간 기반으로 스티어를 내보냄
@@ -382,6 +411,39 @@ class Lane_sub:
         # 평상시 주행
         else:
             center_index = self.get_center_index(msg)
+            if not hasattr(self, 'center_history'):
+                self.center_history = []
+
+            self.center_history.append(center_index)
+            if len(self.center_history) > 5:
+                self.center_history.pop(0)
+
+            if len(self.center_history) == 5:
+                diffs = [abs(self.center_history[i+1] - self.center_history[i]) for i in range(4)]
+                avg_diff = sum(diffs) / len(diffs)
+            else:
+                avg_diff = 0
+
+            base_Kp = 0.1
+            base_Kd = 1.5
+            base_Ki = 0.001
+
+            if avg_diff > 40:
+                Kp = base_Kp * 1.5
+                Kd = base_Kd * 1.5
+            elif avg_diff > 20:
+                Kp = base_Kp * 1.2
+                Kd = base_Kd * 1.2
+            else:
+                Kp = base_Kp
+                Kd = base_Kd
+
+            # 3. PID 제어 함수 호출 시 계수 전달
+            steer, speed = self.straight(center_index, Kp=Kp, Kd=Kd, Ki=base_Ki)
+
+            # 4. 기존에 있던 스티어 명령 전송 코드 등 나머지 처리
+            self.send_steer(steer)
+            self.send_speed(speed)
             steer, speed = self.straight(center_index)
 
         # 안전 체크: steer 값 범위 제한
@@ -404,7 +466,7 @@ class Lane_sub:
 
 def main():
     try:
-        turtle_sub = Lane_sub()
+        _ = Lane_sub()
         rospy.spin()
     except rospy.ROSInterruptException():  # ctrl C -> 강제종료
         pass
