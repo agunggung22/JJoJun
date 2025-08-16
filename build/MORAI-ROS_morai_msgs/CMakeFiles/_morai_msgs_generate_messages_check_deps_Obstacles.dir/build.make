@@ -54,7 +54,7 @@ CMAKE_BINARY_DIR = /home/agung/ros_ed_ws/build
 include MORAI-ROS_morai_msgs/CMakeFiles/_morai_msgs_generate_messages_check_deps_Obstacles.dir/progress.make
 
 MORAI-ROS_morai_msgs/CMakeFiles/_morai_msgs_generate_messages_check_deps_Obstacles:
-	cd /home/agung/ros_ed_ws/build/MORAI-ROS_morai_msgs && ../catkin_generated/env_cached.sh /usr/bin/python3 /opt/ros/noetic/share/genmsg/cmake/../../../lib/genmsg/genmsg_check_deps.py morai_msgs /home/agung/ros_ed_ws/src/MORAI-ROS_morai_msgs/msg/Obstacles.msg std_msgs/Header:geometry_msgs/Quaternion:geometry_msgs/Pose:morai_msgs/Obstacle:geometry_msgs/Point
+	cd /home/agung/ros_ed_ws/build/MORAI-ROS_morai_msgs && ../catkin_generated/env_cached.sh /usr/bin/python3 /opt/ros/noetic/share/genmsg/cmake/../../../lib/genmsg/genmsg_check_deps.py morai_msgs /home/agung/ros_ed_ws/src/MORAI-ROS_morai_msgs/msg/Obstacles.msg geometry_msgs/Point:geometry_msgs/Pose:geometry_msgs/Quaternion:std_msgs/Header:morai_msgs/Obstacle
 
 _morai_msgs_generate_messages_check_deps_Obstacles: MORAI-ROS_morai_msgs/CMakeFiles/_morai_msgs_generate_messages_check_deps_Obstacles
 _morai_msgs_generate_messages_check_deps_Obstacles: MORAI-ROS_morai_msgs/CMakeFiles/_morai_msgs_generate_messages_check_deps_Obstacles.dir/build.make
