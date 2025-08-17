@@ -4,12 +4,12 @@
 """# -*- coding: utf-8 -*- : 인코딩 설정"""
 # -*- coding:utf-8-*-
 
+from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
+from  std_msgs.msg import Float64
+import numpy as np # 행렬 연산을 위한 라이브러리
+import cv2
 import rospy
 from sensor_msgs.msg import CompressedImage # ROS 이미지
-import cv2
-import numpy as np # 행렬 연산을 위한 라이브러리
-from  std_msgs.msg import Float64
-from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
 
 
 class Lane_sub:
@@ -109,7 +109,7 @@ class Lane_sub:
 
     def get_center_index(self, img, direction=None):
         bird_view_img = self.bird_view_transform(img)
-     
+
         # 아래쪽 마스킹 → 너무 짧게 하면 안 됨. lookahead 확보
         guard = max(20, int(0.04 * self.y))  # 하단 4%만 마스킹
         bird_view_img[self.y-guard:self.y, :] = 0
@@ -173,7 +173,7 @@ class Lane_sub:
             center_index = self.x//2
 
         return center_index
-    
+
     def straight(self, center_index, Kp=None, Kd=None, Ki=None):
         error = center_index - self.x // 2
         normalized_error = float(error) / float(self.x)
@@ -192,7 +192,7 @@ class Lane_sub:
         base_Kd = 0.6
         base_Ki = 0.001
 
-        # 동적 조정ㄴ
+        # 동적 조정
         if Kp is None or Kd is None or Ki is None:
             if abs_error > 0.15:
                 Kp = base_Kp * 3.0
@@ -232,7 +232,6 @@ class Lane_sub:
         self.speed_msg.data = float(speed_value)
         self.speed_pub.publish(self.speed_msg)
 
-    
     def stop_line_flag(self, img):
         # 정지선 무시 시간 체크
         current_time = rospy.get_time()
