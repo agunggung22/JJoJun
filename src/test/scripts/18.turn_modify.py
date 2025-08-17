@@ -4,12 +4,13 @@
 """# -*- coding: utf-8 -*- : 인코딩 설정"""
 # -*- coding:utf-8-*-
 
-from  std_msgs.msg import Float64
+from sensor_msgs.msg import LaserScan
 from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
+from  std_msgs.msg import Float64
 import numpy as np # 행렬 연산을 위한 라이브러리
 import cv2
-from sensor_msgs.msg import CompressedImage # ROS 이미지
 import rospy
+from sensor_msgs.msg import CompressedImage # ROS 이미지
 
 
 class Lane_sub:
@@ -75,6 +76,23 @@ class Lane_sub:
 
         self.x = 0  # 이미지 가로 크기
         self.y = 0  # 이미지 세로 크기
+
+        # LiDAR 구독
+        rospy.Subscriber("/lidar2D", LaserScan, self.lidar_cb, queue_size=1)
+        self.scan_msg = LaserScan()
+
+        # 동적 장애물 상태기계
+        self.obs_state = "clear"        # ["clear","wait"]
+        self.obs_first_stop_t = None    # 정지 시작 시각 (10s 초과 방지 확인용)
+        self.obs_last_seen_t = 0.0      # 마지막으로 장애물을 감지한 시각
+        self.obs_centered = False       # 차로 중앙부에 있었는지
+        # 튜닝 파라미터
+        self.obs_front_deg = 30.0       # 전방 섹터(±deg)
+        self.obs_detect_dist = 2     # 장애물 탐지 거리(m)
+        self.lane_half_width = 1.75     # 차로 반폭 추정(필요시 조정)
+        self.edge_margin = 0.40         # 가장자리 판정 여유(m)
+        self.resume_hold = 0.6          # 재출발 전 추가 확인 시간(s)
+        self.obs_edge_since = 0.0
 
     def bird_view_transform(self, img):
         img = self.bridge.compressed_imgmsg_to_cv2(img)
@@ -336,15 +354,81 @@ class Lane_sub:
 
         return steer, v_out
 
-    def cam_CB(self, msg):
-        # 기본값 설정
-        steer = 0.5
-        speed = self.speed  # 기본 주행 속도
+    def lidar_cb(self, msg: LaserScan):
+        self.scan_msg = msg
+        deg_min = msg.angle_min * 180.0 / np.pi
+        deg_inc = msg.angle_increment * 180.0 / np.pi
+        now = rospy.get_time()
 
-        # 정지선 감지 업데이트 (이전 상태 저장)
+        front_hits = []
+        for i, r in enumerate(msg.ranges):
+            if np.isfinite(r) and r > 0.03:
+                th = deg_min + deg_inc * i
+                if -self.obs_front_deg <= th <= self.obs_front_deg and r <= self.obs_detect_dist:
+                    lat = r * np.sin(np.deg2rad(th))   # 횡방향 오프셋
+                    front_hits.append((r, th, lat))
+
+        hit = len(front_hits) > 0
+        center_ok = edge_ok = False
+        if hit:
+            r, th, lat = min(front_hits, key=lambda x: x[0])
+            center_ok = (abs(lat) < self.lane_half_width)
+            edge_ok = (abs(lat) > (self.lane_half_width + self.edge_margin))
+
+        if self.obs_state == "clear":
+            if hit and center_ok:
+                self.obs_state = "wait"
+                self.obs_centered = True
+                self.obs_first_stop_t = now
+                self.obs_last_seen_t = now
+                self.obs_edge_since = 0.0
+                rospy.loginfo("[DYN-OBS] 중앙부 장애물 감지 → 정지 대기 진입")
+        else:
+            if hit:
+                self.obs_last_seen_t = now
+                # 가장자리에서 일정 시간 유지되면 재출발 후보
+                if edge_ok:
+                    if self.obs_edge_since == 0.0:
+                        self.obs_edge_since = now
+                else:
+                    self.obs_edge_since = 0.0
+            else:
+                # 완전 소실
+                self.obs_edge_since = 0.0
+
+    def cam_CB(self, msg):
+        steer = 0.5
+        speed = self.speed
+
         prev_cross_flag = self.cross_flag
         self.stop_line_flag(msg)
         current_time = rospy.get_time()
+
+        # === 동적 장애물: 대기 상태면 우선 정지 ===
+        if self.obs_state == "wait":
+            if self.obs_first_stop_t is not None and (current_time - self.obs_first_stop_t) > 9.5:
+                rospy.logwarn("[DYN-OBS] 정지 10초 임박/초과!")
+
+            # 정지 유지
+            self.steer_msg.data = 0.5
+            self.speed_msg.data = 0.0
+            self.steer_pub.publish(self.steer_msg)
+            self.speed_pub.publish(self.speed_msg)
+
+            # 해제 조건: (가장자리에서 resume_hold 유지) 또는 (완전 소실 후 resume_hold 경과)
+            edge_ok = (self.obs_edge_since > 0.0) and ((current_time - self.obs_edge_since) > self.resume_hold)
+            lost_ok = (current_time - self.obs_last_seen_t) > self.resume_hold
+            if edge_ok or lost_ok:
+                self.obs_state = "clear"
+                self.obs_first_stop_t = None
+                self.obs_edge_since = 0.0
+                rospy.loginfo("[DYN-OBS] 장애물 해제 → 주행 재개")
+
+            # # 디버그 뷰만 갱신 후 조기 반환
+            # bird_view_img = self.bird_view_transform(msg) * 255
+            # cv2.imshow("bird_view_img", bird_view_img)
+            # cv2.waitKey(1)
+            return
 
         # 정지선이 검출 즉시
         if self.cross_flag and not prev_cross_flag:  # rising edge 감지
@@ -444,17 +528,17 @@ class Lane_sub:
         self.steer_pub.publish(self.steer_msg)
         self.speed_pub.publish(self.speed_msg)
 
-        # 디버그 뷰
-        bird_view_img = self.bird_view_transform(msg)*255
-        cv2.imshow("bird_view_img", bird_view_img)
-        cv2.waitKey(1)
+        # # 디버그 뷰
+        # bird_view_img = self.bird_view_transform(msg)*255
+        # cv2.imshow("bird_view_img", bird_view_img)
+        # cv2.waitKey(1)
 
 
 def main():
     try:
         turtle_sub = Lane_sub()
         rospy.spin()
-    except rospy.ROSInterruptException():  # ctrl C -> 강제종료
+    except rospy.ROSInterruptException:  # ctrl C -> 강제종료
         pass
 
 
