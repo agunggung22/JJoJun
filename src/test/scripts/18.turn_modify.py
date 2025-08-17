@@ -4,13 +4,13 @@
 """# -*- coding: utf-8 -*- : 인코딩 설정"""
 # -*- coding:utf-8-*-
 
-from sensor_msgs.msg import LaserScan
-from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
-from  std_msgs.msg import Float64
-import numpy as np # 행렬 연산을 위한 라이브러리
-import cv2
 import rospy
 from sensor_msgs.msg import CompressedImage # ROS 이미지
+import cv2
+import numpy as np # 행렬 연산을 위한 라이브러리
+from  std_msgs.msg import Float64
+from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
+from sensor_msgs.msg import LaserScan
 
 
 class Lane_sub:
@@ -94,6 +94,19 @@ class Lane_sub:
         self.resume_hold = 0.6          # 재출발 전 추가 확인 시간(s)
         self.obs_edge_since = 0.0
 
+        # 정적 장애물 회피 상태
+        self.avoiding_static = False
+        self.avoid_start_time = 0.0
+        self.avoid_dir = "left"
+        self.recovered = False
+
+        # 정적 판단 파라미터
+        self.static_detect_dist = 2.0   # 정면 r ≤ 2m 이내면 후보
+        self.static_persist = 0.5       # 0.5s 이상 같은 자리면 '정적'
+        self.static_seen_since = 0.0
+        self.static_last_r = None
+        self.static_last_lat = None
+
     def bird_view_transform(self, img):
         img = self.bridge.compressed_imgmsg_to_cv2(img)
         self.y, self.x = img.shape[0:2]
@@ -155,26 +168,6 @@ class Lane_sub:
         right_histogram = histogram[self.x//2:]
         right_lane_indices = np.where(right_histogram > 20)[0] + self.x//2
 
-        # # 차선 인덱스의 첫 번째와 마지막 값의 차이 출력
-        # if len(left_lane_indices) > 0:
-        #     left_diff = (left_lane_indices[-1] + left_lane_indices[0])/2
-        # else:
-        #     left_diff = 0
-
-        # if len(right_lane_indices) > 0:
-        #     right_diff = (right_lane_indices[-1] + right_lane_indices[0])/2
-        # else:
-        #     right_diff = 0
-        # print(f"Left: {left_diff} , Right: {right_diff}")
-
-        # # 차선 폭 실시간 출력 추가
-        # if len(left_lane_indices) > 0 and len(right_lane_indices) > 0:
-        #     left_center = left_lane_indices.mean()
-        #     right_center = right_lane_indices.mean()
-        #     current_lane_width = right_center - left_center
-        #     lane_width_ratio = current_lane_width / self.x
-        #     print(f"차선 폭: {current_lane_width:.1f}px ({lane_width_ratio:.3f} * 화면폭)")
-
         try:
             if direction is None:
                 if len(left_lane_indices) > 0 and len(right_lane_indices) > 0:
@@ -202,6 +195,11 @@ class Lane_sub:
 
         except Exception as e:
             center_index = self.x//2
+
+        # ====== 여기 2줄 추가: keep-right 편향 ======
+        keep_right_floor = int(self.x * 0.58)   # 0.56~0.60 사이 튜닝
+        center_index = max(center_index, keep_right_floor)
+        # =========================================
 
         return center_index
 
@@ -354,29 +352,160 @@ class Lane_sub:
 
         return steer, v_out
 
+    # def lidar_cb(self, msg: LaserScan):
+    #     self.scan_msg = msg
+    #     deg_min = msg.angle_min * 180.0 / np.pi
+    #     deg_inc = msg.angle_increment * 180.0 / np.pi
+    #     now = rospy.get_time()
+
+    #     front_hits = []
+    #     for i, r in enumerate(msg.ranges):
+    #         if np.isfinite(r) and r > 0.03:
+    #             th = deg_min + deg_inc * i
+    #             if -self.obs_front_deg <= th <= self.obs_front_deg and r <= self.obs_detect_dist:
+    #                 lat = r * np.sin(np.deg2rad(th))   # 횡방향 오프셋
+    #                 front_hits.append((r, th, lat))
+
+    #     hit = len(front_hits) > 0
+    #     center_ok = edge_ok = False
+    #     if hit:
+    #         r, th, lat = min(front_hits, key=lambda x: x[0])
+    #         center_ok = (abs(lat) < self.lane_half_width)
+    #         edge_ok = (abs(lat) > (self.lane_half_width + self.edge_margin))
+
+    #     if self.obs_state == "clear":
+    #         if hit and center_ok:
+    #             self.obs_state = "wait"
+    #             self.obs_centered = True
+    #             self.obs_first_stop_t = now
+    #             self.obs_last_seen_t = now
+    #             self.obs_edge_since = 0.0
+    #             rospy.loginfo("[DYN-OBS] 중앙부 장애물 감지 → 정지 대기 진입")
+    #     else:
+    #         if hit:
+    #             self.obs_last_seen_t = now
+    #             # 가장자리에서 일정 시간 유지되면 재출발 후보
+    #             if edge_ok:
+    #                 if self.obs_edge_since == 0.0:
+    #                     self.obs_edge_since = now
+    #             else:
+    #                 self.obs_edge_since = 0.0
+    #         else:
+    #             # 완전 소실
+    #             self.obs_edge_since = 0.0
+
+    def avoid_obstacle(self, msg):
+        """정적 장애물 회피: 차선 변경 -> 유지 -> 복귀 (방향: self.avoid_dir)"""
+        steer, speed = 0.5, self.speed
+        t = rospy.get_time() - self.avoid_start_time
+        left = (self.avoid_dir == "left")
+
+        if t <= 1.0:
+            steer = 0.3 if left else 0.7   # 변경
+            speed = 800
+            print(f"장애물 회피: {'좌' if left else '우'}측 변경")
+        elif t <= 2.0:
+            steer = 0.5                    # 유지
+            speed = 800
+            print("장애물 회피: 옆 차선 유지")
+        elif t <= 3.0:
+            steer = 0.7 if left else 0.3   # 복귀
+            speed = 800
+            print("장애물 회피: 원차선 복귀")
+        else:
+            self.recovered = True          # 한 사이클 종료
+
+        return steer, speed
+
     def lidar_cb(self, msg: LaserScan):
         self.scan_msg = msg
         deg_min = msg.angle_min * 180.0 / np.pi
         deg_inc = msg.angle_increment * 180.0 / np.pi
         now = rospy.get_time()
 
+        # ---------- 전방 히트 수집 (기존) ----------
         front_hits = []
         for i, r in enumerate(msg.ranges):
             if np.isfinite(r) and r > 0.03:
                 th = deg_min + deg_inc * i
                 if -self.obs_front_deg <= th <= self.obs_front_deg and r <= self.obs_detect_dist:
-                    lat = r * np.sin(np.deg2rad(th))   # 횡방향 오프셋
+                    lat = r * np.sin(np.deg2rad(th))   # 횡 오프셋
                     front_hits.append((r, th, lat))
 
         hit = len(front_hits) > 0
         center_ok = edge_ok = False
+        r_min = None
+        lat_min = None
         if hit:
-            r, th, lat = min(front_hits, key=lambda x: x[0])
-            center_ok = (abs(lat) < self.lane_half_width)
-            edge_ok = (abs(lat) > (self.lane_half_width + self.edge_margin))
+            r_min, th_min, lat_min = min(front_hits, key=lambda x: x[0])
+            center_ok = (abs(lat_min) < self.lane_half_width)
+            edge_ok = (abs(lat_min) > (self.lane_half_width + self.edge_margin))
+
+        # ---------- (A) 정적 장애물 후보 판정 ----------
+        # 정면 좁은 창(±8°)에서 r ≤ static_detect_dist 이고, 위치 변화가 거의 없으면 '정적'
+        static_hit = False
+        if r_min is not None and r_min <= self.static_detect_dist:
+            # 지속성 체크: 처음 보면 시작, 이후엔 위치 변화량/시간으로 '정적성' 확인
+            if self.static_seen_since == 0.0:
+                self.static_seen_since = now
+                self.static_last_r = r_min
+                self.static_last_lat = lat_min
+            else:
+                dt = now - self.static_seen_since
+                dr = abs(r_min - (self.static_last_r or r_min))
+                dlat = abs(lat_min - (self.static_last_lat or lat_min))
+                if dt >= self.static_persist and dr < 0.25 and dlat < 0.15:
+                    static_hit = True
+            # 최신값 갱신
+            self.static_last_r = r_min
+            self.static_last_lat = lat_min
+        else:
+            # 정면 깨끗하면 정적 후보 리셋
+            self.static_seen_since = 0.0
+            self.static_last_r = None
+            self.static_last_lat = None
+
+        # ---------- (B) 회피 방향 결정 (좌/우 전방 자유공간 비교) ----------
+        if static_hit and (not self.avoiding_static) and (self.obs_state != "wait"):
+            # 좌(+20~+60°), 우(-60~-20°)의 중앙값 거리 비교
+            left_win = []
+            right_win = []
+            for i, r in enumerate(msg.ranges):
+                if not np.isfinite(r) or r <= 0.03:
+                    continue
+                th = deg_min + deg_inc * i
+                if 20.0 <= th <= 60.0:
+                    left_win.append(r)
+                if -60.0 <= th <= -20.0:
+                    right_win.append(r)
+            left_med = np.median(left_win) if left_win else 0.0
+            right_med = np.median(right_win) if right_win else 0.0
+
+            if left_med - right_med > 0.5:
+                self.avoid_dir = "left"
+            elif right_med - left_med > 0.5:
+                self.avoid_dir = "right"
+            else:
+                self.avoid_dir = "left"   # 애매하면 좌로 기본
+
+            self.avoiding_static = True
+            self.avoid_start_time = now
+            self.recovered = False
+            rospy.loginfo(f"[STATIC-OBS] r={r_min:.2f}m, lat={lat_min:.2f}m → 회피 시작 ({self.avoid_dir})")
+            return  # 회피 모드에 맡기기
+
+        # ---------- (C) 동적 장애물 대기 로직 (수정) ----------
+        # 정적 후보 ‘검증 중’(static_persist 미만)에는 wait로 진입하지 않도록 가드
+        static_guard = (
+            (r_min is not None) and
+            (r_min <= self.static_detect_dist) and
+            (self.static_seen_since > 0.0) and
+            ((now - self.static_seen_since) < self.static_persist)
+        )
 
         if self.obs_state == "clear":
-            if hit and center_ok:
+            # 정적 회피 중/확정/검증중이면 대기 진입 금지
+            if hit and center_ok and (not self.avoiding_static) and (not static_hit) and (not static_guard):
                 self.obs_state = "wait"
                 self.obs_centered = True
                 self.obs_first_stop_t = now
@@ -386,14 +515,12 @@ class Lane_sub:
         else:
             if hit:
                 self.obs_last_seen_t = now
-                # 가장자리에서 일정 시간 유지되면 재출발 후보
                 if edge_ok:
                     if self.obs_edge_since == 0.0:
                         self.obs_edge_since = now
                 else:
                     self.obs_edge_since = 0.0
             else:
-                # 완전 소실
                 self.obs_edge_since = 0.0
 
     def cam_CB(self, msg):
@@ -403,6 +530,24 @@ class Lane_sub:
         prev_cross_flag = self.cross_flag
         self.stop_line_flag(msg)
         current_time = rospy.get_time()
+
+        # === 정적 장애물 회피가 진행 중이면 최우선 적용 ===
+        if self.avoiding_static:
+            steer, speed = self.avoid_obstacle(msg)
+            self.steer_msg.data = float(steer)
+            self.speed_msg.data = float(speed)
+            self.steer_pub.publish(self.steer_msg)
+            self.speed_pub.publish(self.speed_msg)
+
+            # (선택) 디버그 뷰가 필요하면 주석 해제
+            # bird_view_img = self.bird_view_transform(msg) * 255
+            # cv2.imshow("bird_view_img", bird_view_img); cv2.waitKey(1)
+
+            if self.recovered:
+                rospy.loginfo("✅ 회피 완료, 정상 주행 복귀")
+                self.avoiding_static = False
+                self.recovered = False
+            return
 
         # === 동적 장애물: 대기 상태면 우선 정지 ===
         if self.obs_state == "wait":
