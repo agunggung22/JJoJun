@@ -4,12 +4,12 @@
 """# -*- coding: utf-8 -*- : 인코딩 설정"""
 # -*- coding:utf-8-*-
 
-import rospy
-from sensor_msgs.msg import CompressedImage # ROS 이미지
-import cv2
-import numpy as np # 행렬 연산을 위한 라이브러리
 from  std_msgs.msg import Float64
 from cv_bridge import CvBridge # openCV 이미지와 ROS 이미지를 변환
+import numpy as np # 행렬 연산을 위한 라이브러리
+import cv2
+from sensor_msgs.msg import CompressedImage # ROS 이미지
+import rospy
 
 
 class Lane_sub:
@@ -25,7 +25,10 @@ class Lane_sub:
         self.speed_pub = rospy.Publisher("/commands/motor/speed", Float64, queue_size=1)
         self.steer_msg = Float64()
         self.speed_msg = Float64()
-        self.speed_msg.data = 500.0   # ← 기본 주행 속도
+
+        self.speed_msg.data = 1000.0   # ← 기본 주행 속도 초기화
+        self.speed = 1000.0   # ← 기본 주행 속도
+        self.count = 0
         # 기본 차선폭은 320
 
         """# --- 1단계용: 교차로 감지용 변수 ---"""
@@ -38,7 +41,8 @@ class Lane_sub:
         self.turn_dir = "left"  # "left" 또는 "right"
         self.turn_phase = "idle"
         self.turn_t0 = 0.0
-        self.turn_speed = 1000.0  # 회전 시 고정 속도
+        self.turn_speed = 1000  # 회전 시 고정 속도
+        self.turn_speed2 = 500.0  # 회전 시 고정 속도
 
         # 차선 한 개일 경우 변수들
         self.one_lane_sequence = ['right', 'right', 'right', 'left']  # one_lane 시퀀스
@@ -60,9 +64,14 @@ class Lane_sub:
         self.post_stopline_duration = 0.8  # 정지선 후 직진 유지 시간 (초)
         self.pending_action = None  # 대기 중인 동작
 
+        # 4번째 정지선 후 속도 제어 변수들
+        self.fourth_stopline_passed = False  # 4번째 정지선 통과 플래그
+        self.fourth_stopline_time = 0.0  # 4번째 정지선 통과 시간
+
         # straight() 함수용 변수들 추가
         self.prev_error = 0.0
         self.prev_steer = 0.5
+        self.prev_time = 0.0  # 추가: 이전 시간 저장용
 
         self.x = 0  # 이미지 가로 크기
         self.y = 0  # 이미지 세로 크기
@@ -192,6 +201,7 @@ class Lane_sub:
         speed_points = [600, 700, 900, 1200, 1500, 1800]
         Kp_points = [1.2, 1.0, 0.65, 0.55, 0.4, 0.3]
         Kd_points = [0.4, 0.5, 0.9, 1.0, 1.1, 1.2]
+
         v = float(self.speed_msg.data)
 
         Kp = np.interp(v, speed_points, Kp_points)
@@ -214,8 +224,9 @@ class Lane_sub:
                 steer_data = self.prev_steer - max_steer_change
 
         self.prev_steer = steer_data
+        print(steer_data)
 
-        return steer_data, self.speed_msg.data
+        return steer_data, self.speed
 
     # 교차로/정지선 감지
 
@@ -328,7 +339,7 @@ class Lane_sub:
     def cam_CB(self, msg):
         # 기본값 설정
         steer = 0.5
-        speed = 1000.0
+        speed = self.speed  # 기본 주행 속도
 
         # 정지선 감지 업데이트 (이전 상태 저장)
         prev_cross_flag = self.cross_flag
@@ -339,6 +350,12 @@ class Lane_sub:
         if self.cross_flag and not prev_cross_flag:  # rising edge 감지
             self.stop_line_detected_time = current_time
             current_action = self.action_sequence[self.current_seq_index]
+
+            # 4번째 정지선 검출 시 시간 기록
+            if self.current_seq_index == 3:  # 4번째 정지선 (인덱스 3)
+                self.fourth_stopline_passed = True
+                self.fourth_stopline_time = current_time
+                print("4번째 정지선 검출! 10초간 속도 500으로 고정")
 
             # 0.5초 카운트 시작
             self.post_stopline_straight = True
@@ -399,6 +416,22 @@ class Lane_sub:
             center_index = self.get_center_index(msg)
             steer, speed = self.straight(center_index)
 
+        # 4번째 정지선 후 10초간 속도 500 고정
+        if self.fourth_stopline_passed:
+            elapsed_time = current_time - self.fourth_stopline_time
+            if elapsed_time <= 6.0:
+                # 0~6초: 원래 속도 유지 (speed 값 그대로)
+                print(f"4번째 정지선 후 원래 속도 유지: {4.0 - elapsed_time:.1f}초 남음")
+            elif elapsed_time <= 14.0:
+                # 6~14초: turn_speed2(500) 속도
+                speed = self.turn_speed2
+                print(f"4번째 정지선 후 속도 500 고정: {14.0 - elapsed_time:.1f}초 남음")
+            else:
+                # 14초 이후: 원래 속도로 복귀하고 플래그 해제
+                self.fourth_stopline_passed = False
+                speed = self.speed
+                print("14초 경과, 정상 속도로 복귀")
+
         # 안전 체크: steer 값 범위 제한
         steer = max(0.0, min(1.0, steer))
 
@@ -411,10 +444,10 @@ class Lane_sub:
         self.steer_pub.publish(self.steer_msg)
         self.speed_pub.publish(self.speed_msg)
 
-        # # 디버그 뷰
-        # bird_view_img = self.bird_view_transform(msg)*255
-        # cv2.imshow("bird_view_img", bird_view_img)
-        # cv2.waitKey(1)
+        # 디버그 뷰
+        bird_view_img = self.bird_view_transform(msg)*255
+        cv2.imshow("bird_view_img", bird_view_img)
+        cv2.waitKey(1)
 
 
 def main():
@@ -427,19 +460,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # # 디버그 뷰
-    # bird_view_img = self.bird_view_transform(msg)*255
-    # cv2.imshow("bird_view_img", bird_view_img)
     # cv2.waitKey(1)
-
-
-def main():
-    try:
-        turtle_sub = Lane_sub()
-        rospy.spin()
-    except rospy.ROSInterruptException():  # ctrl C -> 강제종료
-        pass
-
-
-if __name__ == "__main__":
-    main()
